@@ -768,6 +768,282 @@ EOF
     return 0
 }
 
+# === Функция обновления ноды Drosera ===
+update_drosera_systemd() {
+    print_message $BLUE "==== Обновление ноды Drosera (SystemD) ====="
+    
+    # 1. Автоматически создаем резервную копию перед обновлением
+    print_message $BLUE "Создание резервной копии ноды перед обновлением..."
+    local backup_archive="$HOME/drosera_backup_update_$(date +%Y%m%d_%H%M%S).tar.gz"
+    backup_node_systemd > /dev/null 2>&1 || {
+        print_message $YELLOW "Не удалось создать резервную копию, но продолжаем обновление..."
+    }
+    print_message $GREEN "Резервная копия создана в $backup_archive"
+    
+    # 2. Обновляем Drosera CLI (Droseraup)
+    print_message $BLUE "Обновление Drosera CLI (Droseraup)..."
+    if curl -L https://app.drosera.io/install | bash; then
+        print_message $GREEN "Drosera CLI успешно обновлено."
+        print_message $BLUE "Активация новых команд в PATH..."
+        
+        # Прямое добавление команд в PATH скрипта
+        if [ -f "/usr/local/bin/droseraup" ]; then
+            export PATH="/usr/local/bin:$PATH"
+            print_message $GREEN "Команда droseraup найдена в /usr/local/bin."
+        elif [ -f "$HOME/.local/bin/droseraup" ]; then
+            export PATH="$HOME/.local/bin:$PATH"
+            print_message $GREEN "Команда droseraup найдена в $HOME/.local/bin."
+        else
+            # Поиск команды в системе
+            droseraup_path=$(find / -name droseraup -type f 2>/dev/null | head -n 1)
+            if [ -n "$droseraup_path" ]; then
+                droseraup_dir=$(dirname "$droseraup_path")
+                export PATH="$droseraup_dir:$PATH"
+                print_message $GREEN "Команда droseraup найдена в $droseraup_dir."
+            else
+                print_message $RED "Не удалось найти команду droseraup."
+                print_message $YELLOW "Попробуем запустить через bash source..."
+                # Попытка через source в новом подпроцессе
+                bash -c 'source /root/.bashrc && droseraup' || {
+                    print_message $RED "Не удалось запустить droseraup."
+                    read -p "Продолжить обновление? (y/N): " continue_update
+                    if [[ ! "$continue_update" =~ ^[Yy]$ ]]; then
+                        return 1
+                    fi
+                }
+            fi
+        fi
+        
+        # Проверяем, доступна ли команда droseraup теперь
+        if command -v droseraup &>/dev/null; then
+            print_message $BLUE "Запуск droseraup..."
+            droseraup
+        else
+            print_message $YELLOW "Команда droseraup недоступна в текущем сеансе."
+            print_message $YELLOW "Это не критично, продолжаем обновление."
+        fi
+    else
+        print_message $RED "Ошибка при обновлении Drosera CLI."
+        read -p "Продолжить обновление? (y/N): " continue_update
+        if [[ ! "$continue_update" =~ ^[Yy]$ ]]; then
+            return 1
+        fi
+    fi
+    
+    # 3. Обновляем seed-ноду в конфигурационном файле
+    print_message $BLUE "Обновление seed-ноды в конфигурационном файле..."
+    local drosera_toml="$HOME/my-drosera-trap/drosera.toml"
+    
+    if [ ! -f "$drosera_toml" ]; then
+        print_message $RED "Ошибка: Файл $drosera_toml не найден."
+        read -p "Введите путь к файлу drosera.toml: " custom_path
+        drosera_toml="$custom_path"
+        
+        if [ ! -f "$drosera_toml" ]; then
+            print_message $RED "Ошибка: Файл $drosera_toml не найден. Обновление невозможно."
+            return 1
+        fi
+    fi
+    
+    # Сохраняем текущий пользовательский RPC URL
+    local current_eth_rpc=$(grep "ethereum_rpc" "$drosera_toml" | sed 's/ethereum_rpc\s*=\s*"\(.*\)"/\1/')
+    print_message $BLUE "Обнаружен пользовательский Ethereum RPC URL: $current_eth_rpc"
+    
+    # Делаем резервную копию файла конфигурации
+    cp "$drosera_toml" "${drosera_toml}.backup_$(date +%Y%m%d_%H%M%S)"
+    print_message $GREEN "Создана резервная копия файла конфигурации."
+    
+    # Заменяем старый seed-node на новый, сохраняя пользовательский URL
+    if grep -q "seed-node.testnet.drosera.io" "$drosera_toml"; then
+        sed -i 's|seed-node\.testnet\.drosera\.io|relay.testnet.drosera.io|g' "$drosera_toml"
+        print_message $GREEN "Seed-нода успешно обновлена на relay.testnet.drosera.io."
+    elif ! grep -q "drosera_rpc.*relay.testnet.drosera.io" "$drosera_toml"; then
+        # Если drosera_rpc существует, но не содержит relay.testnet.drosera.io
+        if grep -q "drosera_rpc" "$drosera_toml"; then
+            print_message $YELLOW "Обновление адреса Drosera RPC на relay.testnet.drosera.io..."
+            sed -i 's|drosera_rpc\s*=\s*"\(.*\)"|drosera_rpc = "https://relay.testnet.drosera.io"|g' "$drosera_toml"
+            print_message $GREEN "Drosera RPC успешно обновлен на relay.testnet.drosera.io."
+        else
+            print_message $YELLOW "Добавление адреса Drosera RPC relay.testnet.drosera.io..."
+            echo 'drosera_rpc = "https://relay.testnet.drosera.io"' >> "$drosera_toml"
+            print_message $GREEN "Drosera RPC успешно добавлен."
+        fi
+    else
+        print_message $GREEN "Drosera RPC уже настроен на relay.testnet.drosera.io."
+    fi
+    
+    # Проверяем настройки RPC и выводим их
+    print_message $BLUE "Текущие настройки RPC в файле:"
+    grep -i "rpc" "$drosera_toml" || print_message $RED "Записи RPC не найдены."
+    
+    # 4. Проверяем адрес трапа
+    print_message $BLUE "Проверка адреса трапа в конфигурационном файле..."
+    if ! grep -q "^address = \"0x" "$drosera_toml"; then
+        print_message $YELLOW "Внимание: Адрес трапа (формат 'address = \"0x...\"') не найден в файле конфигурации."
+        print_message $YELLOW "Вам необходимо добавить адрес трапа в файл конфигурации."
+        print_message $YELLOW "Вы можете найти адрес на Dashboard: https://app.drosera.io/"
+        
+        read -p "Хотите добавить адрес трапа сейчас? (y/N): " add_address
+        if [[ "$add_address" =~ ^[Yy]$ ]]; then
+            read -p "Введите адрес трапа (начинается с 0x): " trap_address
+            # Добавим адрес в начало файла (можно настроить, где именно)
+            sed -i "1s/^/address = \"$trap_address\"\n/" "$drosera_toml"
+            print_message $GREEN "Адрес трапа добавлен в файл конфигурации."
+        fi
+    else
+        print_message $GREEN "Адрес трапа найден в файле конфигурации."
+    fi
+    
+    # 5. Повторно применяем конфигурацию Drosera
+    print_message $BLUE "Повторное применение конфигурации Drosera..."
+    
+    # Ищем приватный ключ в файле окружения или запрашиваем у пользователя
+    local private_key=""
+    local env_file="/root/.drosera_operator.env"
+    
+    if [ -f "$env_file" ]; then
+        # Извлекаем ключ из файла окружения
+        print_message $BLUE "Автоматическое извлечение приватного ключа из $env_file..."
+        private_key=$(grep -oP 'DROSERA_PRIVATE_KEY=\K[^\s]+' "$env_file" 2>/dev/null || echo "")
+        
+        if [ -n "$private_key" ]; then
+            print_message $GREEN "Приватный ключ успешно получен из файла."
+        else
+            print_message $YELLOW "Не удалось найти приватный ключ в файле."
+        fi
+    else
+        print_message $YELLOW "Файл окружения $env_file не найден."
+    fi
+    
+    # Если ключ не найден в файле, запрашиваем его у пользователя
+    if [ -z "$private_key" ]; then
+        print_message $YELLOW "Необходимо ввести приватный ключ трапа."
+        read -s -p "Введите приватный ключ трапа: " private_key
+        echo # Перевод строки после ввода
+    fi
+    
+    # Проверяем, что ключ не пуст
+    if [ -z "$private_key" ]; then
+        print_message $RED "Приватный ключ не может быть пустым."
+        return 1
+    fi
+    
+    # Переходим в каталог трапа
+    trap_dir="$HOME/my-drosera-trap"
+    if [ ! -d "$trap_dir" ]; then
+        trap_dir="$(dirname "$drosera_toml")"
+    fi
+    
+    cd "$trap_dir" || { 
+        print_message $RED "Не удалось перейти в директорию трапа $trap_dir." 
+        read -p "Введите путь к директории трапа: " custom_trap_dir
+        cd "$custom_trap_dir" || { 
+            print_message $RED "Не удалось перейти в указанную директорию. Обновление прервано."
+            return 1
+        }
+    }
+    
+    print_message $BLUE "Выполнение команды 'drosera apply'..."
+    print_message $YELLOW "(Когда будет запрос, автоматически будет введено 'ofc')"
+    
+    # Подготавливаем команду для автоматического ввода "ofc"
+    apply_cmd="echo 'ofc' | DROSERA_PRIVATE_KEY='$private_key' drosera apply"
+    
+    # Проверяем, доступна ли команда drosera в текущем PATH
+    if command -v drosera &>/dev/null; then
+        eval "$apply_cmd"
+        apply_result=$?
+    else
+        # Поиск команды drosera в системе
+        drosera_path=$(find / -name drosera -type f 2>/dev/null | head -n 1)
+        if [ -n "$drosera_path" ]; then
+            print_message $GREEN "Команда drosera найдена в $drosera_path."
+            eval "echo 'ofc' | DROSERA_PRIVATE_KEY='$private_key' '$drosera_path' apply"
+            apply_result=$?
+        else
+            print_message $YELLOW "Попытка запуска через bash source..."
+            # Автоматически вводим "ofc" на запрос
+            bash -c "source /root/.bashrc && echo 'ofc' | DROSERA_PRIVATE_KEY='$private_key' drosera apply" 2>/dev/null
+            apply_result=$?
+            
+            if [ $apply_result -ne 0 ]; then
+                print_message $RED "Не удалось запустить команду drosera."
+                print_message $YELLOW "Попробуйте выполнить следующие команды вручную после завершения скрипта:"
+                print_message $YELLOW "source /root/.bashrc"
+                print_message $YELLOW "echo 'ofc' | DROSERA_PRIVATE_KEY=XXX drosera apply"
+                print_message $YELLOW "sudo systemctl restart drosera.service"
+            fi
+        fi
+    fi
+    
+    if [ $apply_result -ne 0 ]; then
+        print_message $RED "Ошибка при применении конфигурации."
+        read -p "Продолжить обновление? (y/N): " continue_update
+        if [[ ! "$continue_update" =~ ^[Yy]$ ]]; then
+            return 1
+        fi
+    fi
+    
+    # 6. Автоматически открываем UDP порты
+    print_message $BLUE "Автоматическое открытие UDP портов..."
+    
+    # Проверяем количество операторов в конфигурации
+    local operator_count=1  # По умолчанию 1 оператор
+    
+    # Пытаемся определить количество операторов по конфигурации
+    if grep -q "operator2" "$drosera_toml" || grep -q "\[operators.2\]" "$drosera_toml"; then
+        operator_count=2
+        print_message $BLUE "Обнаружено 2 оператора в конфигурации."
+    else
+        print_message $BLUE "Обнаружен 1 оператор в конфигурации."
+    fi
+    
+    # Открываем порты для первого оператора
+    print_message $BLUE "Открытие портов для первого оператора (31313/udp, 31314/udp)..."
+    sudo ufw allow 31313/udp &>/dev/null || true
+    sudo ufw allow 31314/udp &>/dev/null || true
+    
+    # Если есть второй оператор, открываем и его порты
+    if [ "$operator_count" -eq 2 ]; then
+        print_message $BLUE "Открытие портов для второго оператора (31315/udp, 31316/udp)..."
+        sudo ufw allow 31315/udp &>/dev/null || true
+        sudo ufw allow 31316/udp &>/dev/null || true
+    fi
+    
+    print_message $GREEN "UDP порты успешно открыты."
+    
+    # 7. Перезапускаем службу drosera
+    print_message $BLUE "Перезапуск службы drosera..."
+    
+    # Плавный перезапуск службы
+    sudo systemctl stop drosera.service
+    sleep 3 # Даем больше времени на остановку
+    
+    # Проверяем, что служба действительно остановилась
+    for i in {1..5}; do
+        if ! systemctl is-active drosera.service &>/dev/null; then
+            break
+        fi
+        print_message $YELLOW "Ожидание остановки службы..."
+        sleep 2
+    done
+    
+    sudo systemctl start drosera.service
+    sleep 3 # Даем время на запуск
+    
+    # 8. Проверяем статус
+    print_message $BLUE "Проверка статуса службы..."
+    sudo systemctl status drosera.service --no-pager -l
+    
+    print_message $GREEN "==== Обновление завершено ====="
+    print_message $YELLOW "Для просмотра логов в реальном времени используйте: sudo journalctl -u drosera.service -f"
+    print_message $YELLOW "Первые несколько минут могут быть ошибки, это нормально."
+    
+    # Ждём, пока пользователь ознакомится с результатом
+    read -p "Нажмите Enter для возврата в меню..."
+    return 0
+}
+
 # === Главное меню ===
 main_menu() {
     while true; do
@@ -780,6 +1056,7 @@ main_menu() {
         echo -e "Статус службы drosera.service: $( [[ "$status" == "active" ]] && echo -e "${GREEN}Активна${NC}" || echo -e "${RED}Не активна (${status:-не найдена})${NC}" )"
         print_message $BLUE "---------------------- Установка -----------------------"
         print_message $YELLOW " 1. Запустить полную установку/переустановку (SystemD)"
+        print_message $GREEN " 8. Обновить ноду Drosera до новой версии"
         print_message $BLUE "-------------------- Управление нодой --------------------"
         print_message $GREEN " 2. Показать статус и последние логи"
         print_message $GREEN " 3. Запустить службу"
@@ -803,6 +1080,7 @@ main_menu() {
             5) backup_node_systemd ;;   
             6) backup_and_serve_systemd ;;   
             7) print_message $RED "Функция восстановления пока не реализована." ;; 
+            8) update_drosera_systemd ;; 
             # 7) re_register_operator_menu ;; # Placeholder
             # 8) uninstall_node ;;    # Placeholder
             0) print_message $GREEN "Выход."; exit 0 ;;
