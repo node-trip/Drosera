@@ -1044,6 +1044,174 @@ update_drosera_systemd() {
     return 0
 }
 
+# === Функция обновления RPC эндпоинта ===
+update_rpc_endpoint() {
+    print_message $BLUE "==== Обновление RPC эндпоинта для Holesky ====="
+    
+    # Проверяем наличие файла окружения
+    local env_file="/root/.drosera_operator.env"
+    
+    if [ ! -f "$env_file" ]; then
+        print_message $RED "Ошибка: Файл окружения $env_file не найден."
+        read -p "Хотите создать новый файл? (y/N): " create_new
+        if [[ ! "$create_new" =~ ^[Yy]$ ]]; then
+            print_message $YELLOW "Обновление отменено."
+            return 1
+        fi
+        
+        # Создаем новый файл окружения, если его нет
+        print_message $BLUE "Создание нового файла окружения..."
+        
+        # Запрашиваем необходимые данные
+        read -p "🔐 Drosera private key (без 0x): " PK_RAW
+        # Убираем префикс 0x из ключа, если он был введен
+        PK=${PK_RAW#0x}
+        
+        read -p "🌍 VPS public IP: " VPSIP
+        
+        print_message $GREEN "Создание файла $env_file..."
+        sudo bash -c "cat > $env_file" << EOF
+ETH_PRIVATE_KEY=$PK
+VPS_IP=$VPSIP
+ETH_RPC_URL=https://eth-holesky.g.alchemy.com/v2/ylmyt8-w_U6tVv9wUw8hbm2Sl1GkTVYB
+EOF
+        sudo chmod 600 "$env_file" # Безопасные права
+        print_message $GREEN "Файл окружения создан с новым RPC эндпоинтом."
+    else
+        # Файл существует, обновляем RPC эндпоинт
+        print_message $BLUE "Обнаружен файл окружения. Обновление RPC эндпоинта..."
+        
+        # Сначала проверим, существует ли строка с ETH_RPC_URL
+        if grep -q "ETH_RPC_URL" "$env_file"; then
+            # Читаем текущий RPC эндпоинт
+            current_rpc=$(grep "ETH_RPC_URL" "$env_file" | cut -d= -f2)
+            print_message $YELLOW "Текущий RPC эндпоинт: $current_rpc"
+            
+            # Делаем резервную копию файла окружения
+            cp "$env_file" "${env_file}.backup_$(date +%Y%m%d_%H%M%S)"
+            print_message $GREEN "Создана резервная копия файла окружения."
+            
+            # Обновляем RPC эндпоинт
+            sed -i 's|^ETH_RPC_URL=.*|ETH_RPC_URL=https://eth-holesky.g.alchemy.com/v2/ylmyt8-w_U6tVv9wUw8hbm2Sl1GkTVYB|' "$env_file"
+            print_message $GREEN "RPC эндпоинт успешно обновлен."
+        else
+            # Строка с ETH_RPC_URL не найдена, добавляем ее
+            print_message $YELLOW "Строка ETH_RPC_URL не найдена в файле окружения."
+            echo "ETH_RPC_URL=https://eth-holesky.g.alchemy.com/v2/ylmyt8-w_U6tVv9wUw8hbm2Sl1GkTVYB" >> "$env_file"
+            print_message $GREEN "RPC эндпоинт успешно добавлен."
+        fi
+    fi
+    
+    # Обновляем RPC эндпоинт в drosera.toml, если файл существует
+    local drosera_toml="$HOME/my-drosera-trap/drosera.toml"
+    if [ -f "$drosera_toml" ]; then
+        print_message $BLUE "Обновление RPC эндпоинта в файле конфигурации $drosera_toml..."
+        
+        # Делаем резервную копию файла конфигурации
+        cp "$drosera_toml" "${drosera_toml}.backup_$(date +%Y%m%d_%H%M%S)"
+        
+        # Проверяем наличие строки ethereum_rpc
+        if grep -q "ethereum_rpc" "$drosera_toml"; then
+            # Обновляем строку ethereum_rpc
+            sed -i 's|ethereum_rpc = ".*"|ethereum_rpc = "https://eth-holesky.g.alchemy.com/v2/ylmyt8-w_U6tVv9wUw8hbm2Sl1GkTVYB"|' "$drosera_toml"
+            print_message $GREEN "RPC эндпоинт в файле конфигурации успешно обновлен."
+        else
+            # Строка ethereum_rpc не найдена, добавляем ее
+            echo 'ethereum_rpc = "https://eth-holesky.g.alchemy.com/v2/ylmyt8-w_U6tVv9wUw8hbm2Sl1GkTVYB"' >> "$drosera_toml"
+            print_message $GREEN "RPC эндпоинт в файле конфигурации успешно добавлен."
+        fi
+    else
+        print_message $YELLOW "Файл конфигурации $drosera_toml не найден."
+    fi
+    
+    # Предлагаем перезапустить службу
+    print_message $BLUE "Для применения изменений рекомендуется перезапустить службу."
+    read -p "Перезапустить службу drosera.service? (Y/n): " restart_service
+    if [[ ! "$restart_service" =~ ^[Nn]$ ]]; then
+        print_message $BLUE "Перезапуск службы drosera.service..."
+        sudo systemctl restart drosera.service
+        sleep 3
+        sudo systemctl status drosera.service --no-pager -l
+        print_message $GREEN "Служба перезапущена. Новый RPC эндпоинт активирован."
+    else
+        print_message $YELLOW "Служба не перезапущена. Необходимо перезапустить вручную для применения изменений."
+    fi
+    
+    # Функция для изменения RPC через меню
+    change_rpc_menu() {
+        print_message $BLUE "==== Меню изменения RPC эндпоинта ====="
+        print_message $YELLOW "1. Использовать Public Node RPC: https://ethereum-holesky-rpc.publicnode.com"
+        print_message $YELLOW "2. Ввести свой RPC эндпоинт"
+        print_message $NC "0. Назад"
+        
+        read -p "Выберите опцию: " rpc_choice
+        
+        local new_rpc=""
+        case $rpc_choice in
+            1) new_rpc="https://ethereum-holesky-rpc.publicnode.com" ;;
+            2) read -p "Введите свой RPC эндпоинт: " new_rpc ;;
+            0) return 0 ;;
+            *) print_message $RED "Неверная опция."; return 1 ;;
+        esac
+        
+        if [ -z "$new_rpc" ]; then
+            print_message $RED "RPC эндпоинт не может быть пустым."
+            return 1
+        fi
+        
+        # Обновляем RPC в файле окружения
+        if [ -f "$env_file" ]; then
+            # Делаем резервную копию файла окружения
+            cp "$env_file" "${env_file}.backup_$(date +%Y%m%d_%H%M%S)"
+            
+            if grep -q "ETH_RPC_URL" "$env_file"; then
+                sed -i "s|^ETH_RPC_URL=.*|ETH_RPC_URL=$new_rpc|" "$env_file"
+            else
+                echo "ETH_RPC_URL=$new_rpc" >> "$env_file"
+            fi
+            print_message $GREEN "RPC эндпоинт в файле окружения обновлен."
+        else
+            print_message $RED "Файл окружения не найден."
+            return 1
+        fi
+        
+        # Обновляем RPC в drosera.toml
+        if [ -f "$drosera_toml" ]; then
+            # Делаем резервную копию файла конфигурации
+            cp "$drosera_toml" "${drosera_toml}.backup_$(date +%Y%m%d_%H%M%S)"
+            
+            if grep -q "ethereum_rpc" "$drosera_toml"; then
+                sed -i "s|ethereum_rpc = \".*\"|ethereum_rpc = \"$new_rpc\"|" "$drosera_toml"
+            else
+                echo "ethereum_rpc = \"$new_rpc\"" >> "$drosera_toml"
+            fi
+            print_message $GREEN "RPC эндпоинт в файле конфигурации обновлен."
+        fi
+        
+        # Предлагаем перезапустить службу
+        read -p "Перезапустить службу drosera.service? (Y/n): " restart_service
+        if [[ ! "$restart_service" =~ ^[Nn]$ ]]; then
+            sudo systemctl restart drosera.service
+            sleep 3
+            sudo systemctl status drosera.service --no-pager -l
+            print_message $GREEN "Служба перезапущена. Новый RPC эндпоинт активирован."
+        else
+            print_message $YELLOW "Служба не перезапущена. Необходимо перезапустить вручную для применения изменений."
+        fi
+        
+        return 0
+    }
+    
+    # Спрашиваем, хочет ли пользователь выбрать другой RPC
+    print_message $BLUE "Хотите выбрать другой RPC эндпоинт?"
+    read -p "Открыть меню выбора RPC? (y/N): " open_menu
+    if [[ "$open_menu" =~ ^[Yy]$ ]]; then
+        change_rpc_menu
+    fi
+    
+    return 0
+}
+
 # === Главное меню ===
 main_menu() {
     while true; do
@@ -1065,6 +1233,7 @@ main_menu() {
         print_message $YELLOW " 5. Создать резервную копию (Только архив)"
         print_message $YELLOW " 6. Создать и выдать бэкап по ссылке"
         print_message $NC   " 7. Восстановить из резервной копии (НЕ РЕАЛИЗОВАНО)"
+        print_message $GREEN " 9. Обновить RPC эндпоинт для Holesky"
         # print_message $YELLOW " 7. Перерегистрировать оператора (НЕ РЕАЛИЗОВАНО)"
         # print_message $RED   " 8. Удалить ноду (НЕ РЕАЛИЗОВАНО)"
         print_message $BLUE "---------------------------------------------------------"
@@ -1081,6 +1250,7 @@ main_menu() {
             6) backup_and_serve_systemd ;;   
             7) print_message $RED "Функция восстановления пока не реализована." ;; 
             8) update_drosera_systemd ;; 
+            9) update_rpc_endpoint ;;
             # 7) re_register_operator_menu ;; # Placeholder
             # 8) uninstall_node ;;    # Placeholder
             0) print_message $GREEN "Выход."; exit 0 ;;
